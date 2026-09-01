@@ -1,0 +1,74 @@
+# ---------- Go ----------
+# Binaries
+services/**/bin/
+services/**/*.exe
+services/**/*.exe~
+services/**/*.dll
+services/**/*.so
+services/**/*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of `go build`
+/services/auth/auth
+/services/budget/budget
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Coverage
+*.out
+coverage.html
+
+# ---------- Node / React Native / Expo ----------
+mobile/node_modules/
+mobile/.expo/
+mobile/.expo-shared/
+mobile/dist/
+mobile/web-build/
+mobile/npm-debug.*
+mobile/yarn-debug.*
+mobile/yarn-error.*
+mobile/*.jks
+mobile/*.p8
+mobile/*.p12
+mobile/*.key
+mobile/*.mobileprovision
+mobile/*.orig.*
+mobile/ios/
+mobile/android/
+
+# ---------- Env / secrets ----------
+.env
+.env.*
+!.env.example
+**/secrets.yaml
+**/*secret*.local.yaml
+*.pem
+*.key
+kubeconfig*.yaml
+
+# ---------- Docker ----------
+*.log
+
+# ---------- Kubernetes / kind ----------
+kind-logs/
+
+# ---------- IDE / editor ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---------- OS ----------
+.DS_Store
+Thumbs.db
+
+# ---------- Misc build artifacts ----------
+dist/
+build/
+tmp/
+*.tmp
