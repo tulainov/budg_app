@@ -1,4 +1,13 @@
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+-- Wrapped because pgcrypto is database-wide, not schema-scoped: this file
+-- runs from both the auth and budget services against the same database,
+-- and if both start within milliseconds of each other, IF NOT EXISTS alone
+-- doesn't prevent one of them from losing a race on pg_extension_name_index.
+DO $$
+BEGIN
+    CREATE EXTENSION IF NOT EXISTS pgcrypto;
+EXCEPTION WHEN unique_violation THEN
+    NULL;
+END $$;
 
 CREATE SCHEMA IF NOT EXISTS budget;
 

@@ -35,17 +35,26 @@ spec:
             - name: jwt-keys
               mountPath: /etc/jwt
               readOnly: true
+          # The process blocks on a DB connection (with its own internal
+          # retry loop, up to ~2 minutes) before it ever binds :8080, so
+          # liveness/readiness must not be evaluated until it responds at
+          # least once — otherwise Kubernetes kills the container for being
+          # slow to start, before its own retry logic gets a chance to work.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 30
           readinessProbe:
             httpGet:
               path: /healthz
               port: 8080
-            initialDelaySeconds: 2
             periodSeconds: 5
           livenessProbe:
             httpGet:
               path: /healthz
               port: 8080
-            initialDelaySeconds: 5
             periodSeconds: 10
       volumes:
         - name: jwt-keys

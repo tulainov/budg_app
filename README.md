@@ -218,7 +218,7 @@ docker build -t budget-app/budget:dev services/budget
 kind load docker-image budget-app/auth:dev --name budget-app
 kind load docker-image budget-app/budget:dev --name budget-app
 
-./scripts/generate-secrets.sh
+bash scripts/generate-secrets.sh
 
 kubectl apply -f k8s/namespace.yaml
 kubectl apply -f k8s/secrets.yaml
@@ -243,17 +243,53 @@ kubectl -n budget-app port-forward svc/auth 8081:80 &
 kubectl -n budget-app port-forward svc/budget 8082:80 &
 ```
 
-**A gotcha worth remembering for a from-scratch cluster rebuild:** kind's
-default `local-path-provisioner` StorageClass does not reliably give you a
-freshly empty volume just because you deleted and recreated the PVC — during
-development, a "clean" PVC once came back bound to a `local-path` volume that
-still held the previous PostgreSQL data directory, which meant `POSTGRES_*`
-env vars from a new Secret were silently ignored (`initdb` only runs against
-a genuinely empty data directory). If Postgres ever reports `"skipping
-initialization"` on a pod that's supposed to be fresh, that's why — the fix
-is to either fully rebuild the kind cluster (which the buffer day already
-does) or reconcile the running role/database by hand rather than assuming a
-PVC delete gave you a blank slate.
+### Buffer day: what a full cluster rebuild actually found
+
+Everything above was reached incrementally during development, with fixes
+sometimes applied by hand to a live cluster. To check that the repo alone
+(not the accumulated state of one long-lived cluster) is enough to reproduce
+a working deployment, the whole thing was torn down (`kind delete cluster`)
+and rebuilt from scratch, more than once, following only the commands above.
+That process surfaced three real, fixed issues:
+
+1. **A PVC delete is not a reliable "clean slate."** Early on, deleting just
+   the `postgres-data` PVC (while leaving the rest of the cluster running)
+   and recreating it came back bound to a `local-path` volume that still held
+   the *previous* PostgreSQL data directory — `POSTGRES_*` env vars from a
+   new Secret were silently ignored, since `initdb` only runs against a
+   genuinely empty data directory (Postgres logs `"skipping initialization"`
+   when this happens). A full `kind delete cluster` + recreate does not have
+   this problem — the node's entire filesystem goes with it — so that's the
+   reliable way to get a truly blank slate, not a PVC delete on a live
+   cluster.
+
+2. **`auth` and `budget` raced each other to create the `pgcrypto` extension.**
+   Both services' `schema.sql` runs `CREATE EXTENSION IF NOT EXISTS pgcrypto`
+   against the same Postgres instance (the extension is database-wide, not
+   schema-scoped). When both pods start within milliseconds of each other on
+   a fresh cluster, `IF NOT EXISTS` alone doesn't prevent one of them from
+   losing a race on `pg_extension_name_index` and crashing. Fixed by wrapping
+   the statement in a `DO $$ ... EXCEPTION WHEN unique_violation THEN NULL;
+   END $$;` block in both `schema.sql` files, so the loser of the race treats
+   "someone else already created it" as success instead of an error.
+
+3. **The liveness probe could kill a pod before its own retry logic got a
+   chance to work.** Both services block in `main()` on a database
+   connection (with an internal retry loop of up to ~2 minutes, to tolerate
+   Postgres's own cold-start time — including a possible image pull, since
+   only the two app images are pre-loaded into kind via `kind load
+   docker-image`, not Postgres's) before ever binding `:8080`. The original
+   `livenessProbe` started checking after only 5 seconds, got "connection
+   refused" repeatedly, and killed the container — restarting it before
+   Postgres was even reachable. This is why every Deployment now has a
+   `startupProbe` ahead of its readiness/liveness probes: Kubernetes won't
+   evaluate liveness at all until the app responds successfully once, so a
+   legitimately slow (but not stuck) startup no longer gets treated as a
+   crash.
+
+After all three fixes, a completely fresh `kind delete cluster` →
+`kind create cluster` → apply-everything cycle came up with **zero pod
+restarts** across `postgres`, `auth`, `budget`, and `prometheus`.
 
 ## CNCF Landscape technology: Prometheus
 
