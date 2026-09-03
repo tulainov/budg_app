@@ -44,10 +44,15 @@ mobile/android/
 .env
 .env.*
 !.env.example
-**/secrets.yaml
-**/*secret*.local.yaml
 *.pem
 *.key
+*.crt
+**/*secret*.yaml
+**/*secret*.yml
+**/*credential*.yaml
+**/*credential*.yml
+!**/*.example.yaml
+!**/*.example.yml
 kubeconfig*.yaml
 
 # ---------- Docker ----------
