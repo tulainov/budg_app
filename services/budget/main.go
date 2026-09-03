@@ -9,6 +9,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func getenv(key, fallback string) string {
@@ -55,15 +57,17 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	mux.HandleFunc("POST /categories", auth(categories.create))
-	mux.HandleFunc("GET /categories", auth(categories.list))
-	mux.HandleFunc("DELETE /categories/{id}", auth(categories.delete))
+	mux.HandleFunc("POST /categories", instrument("/categories", auth(categories.create)))
+	mux.HandleFunc("GET /categories", instrument("/categories", auth(categories.list)))
+	mux.HandleFunc("DELETE /categories/{id}", instrument("/categories/{id}", auth(categories.delete)))
 
-	mux.HandleFunc("POST /transactions", auth(transactions.create))
-	mux.HandleFunc("GET /transactions", auth(transactions.list))
-	mux.HandleFunc("GET /transactions/{id}", auth(transactions.get))
-	mux.HandleFunc("PUT /transactions/{id}", auth(transactions.update))
-	mux.HandleFunc("DELETE /transactions/{id}", auth(transactions.delete))
+	mux.HandleFunc("POST /transactions", instrument("/transactions", auth(transactions.create)))
+	mux.HandleFunc("GET /transactions", instrument("/transactions", auth(transactions.list)))
+	mux.HandleFunc("GET /transactions/{id}", instrument("/transactions/{id}", auth(transactions.get)))
+	mux.HandleFunc("PUT /transactions/{id}", instrument("/transactions/{id}", auth(transactions.update)))
+	mux.HandleFunc("DELETE /transactions/{id}", instrument("/transactions/{id}", auth(transactions.delete)))
+
+	mux.Handle("GET /metrics", promhttp.Handler())
 
 	httpServer := &http.Server{Addr: ":" + port, Handler: mux}
 

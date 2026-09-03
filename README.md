@@ -189,12 +189,113 @@ instead).
 
 ## Kubernetes / kind
 
-Covered in a later step. `k8s/namespace.yaml`, `k8s/auth-deployment.yaml`, and
-`k8s/auth-service.yaml` currently exist as a proof that the
-Go → Docker → kind → Deployment/Service toolchain works end to end; the
-budget service and Postgres manifests, plus Secrets for DB credentials and
-the JWT signing key, come next.
+All three components run in the `budget-app` namespace of a local `kind`
+cluster (cluster name `budget-app`): `postgres` (Deployment + PVC, no
+StatefulSet — a single replica with `strategy: Recreate` is enough here),
+`auth`, and `budget` (Deployment + Service each). `auth` and `budget` reach
+Postgres via the `postgres` ClusterIP Service's DNS name — the same
+`postgres:5432` hostname works whether a pod lands on any node in the
+cluster, no hardcoded IPs anywhere. `budget` reaches `auth`'s public key the
+same way conceptually, except it doesn't even need `auth` to be reachable at
+request time, per the RS256-local-verification decision above — the public
+key is just mounted from a Secret at startup.
 
-## CNCF Landscape technology
+**Secrets**: `postgres-credentials` (DB user/password/db-name plus a
+ready-to-use `database-url`) and `jwt-keys` (the RSA keypair) are generated
+locally by `scripts/generate-secrets.sh` into `k8s/secrets.yaml`, which is
+gitignored and never committed — see `k8s/secrets.example.yaml` for the
+shape. `auth` only gets `private.pem` mounted (via the Secret volume's
+`items` filter), `budget` only gets `public.pem` — each service can only see
+the key material it actually needs.
 
-Covered in a later step (Prometheus, scraping `/metrics` on both services).
+Deploying from scratch:
+
+```bash
+kind create cluster --name budget-app
+
+docker build -t budget-app/auth:dev services/auth
+docker build -t budget-app/budget:dev services/budget
+kind load docker-image budget-app/auth:dev --name budget-app
+kind load docker-image budget-app/budget:dev --name budget-app
+
+./scripts/generate-secrets.sh
+
+kubectl apply -f k8s/namespace.yaml
+kubectl apply -f k8s/secrets.yaml
+kubectl apply -f k8s/postgres-pvc.yaml -f k8s/postgres-deployment.yaml -f k8s/postgres-service.yaml
+kubectl apply -f k8s/auth-deployment.yaml -f k8s/auth-service.yaml
+kubectl apply -f k8s/budget-deployment.yaml -f k8s/budget-service.yaml
+kubectl apply -f k8s/monitoring/prometheus-configmap.yaml \
+               -f k8s/monitoring/prometheus-deployment.yaml \
+               -f k8s/monitoring/prometheus-service.yaml
+
+kubectl -n budget-app rollout status deployment/postgres
+kubectl -n budget-app rollout status deployment/auth
+kubectl -n budget-app rollout status deployment/budget
+kubectl -n budget-app rollout status deployment/prometheus
+```
+
+Then reach either service the same way as the local setup, just via
+port-forward instead of a bare port:
+
+```bash
+kubectl -n budget-app port-forward svc/auth 8081:80 &
+kubectl -n budget-app port-forward svc/budget 8082:80 &
+```
+
+**A gotcha worth remembering for a from-scratch cluster rebuild:** kind's
+default `local-path-provisioner` StorageClass does not reliably give you a
+freshly empty volume just because you deleted and recreated the PVC — during
+development, a "clean" PVC once came back bound to a `local-path` volume that
+still held the previous PostgreSQL data directory, which meant `POSTGRES_*`
+env vars from a new Secret were silently ignored (`initdb` only runs against
+a genuinely empty data directory). If Postgres ever reports `"skipping
+initialization"` on a pod that's supposed to be fresh, that's why — the fix
+is to either fully rebuild the kind cluster (which the buffer day already
+does) or reconcile the running role/database by hand rather than assuming a
+PVC delete gave you a blank slate.
+
+## CNCF Landscape technology: Prometheus
+
+Both `auth` and `budget` expose a `GET /metrics` endpoint (via
+`prometheus/client_golang`'s `promhttp.Handler()`), and a Prometheus
+Deployment in the `budget-app` namespace (`k8s/monitoring/`) scrapes both
+every 15s.
+
+**What's exposed beyond the default Go runtime metrics** (`go_*`,
+`process_*`): every non-health-check route is wrapped in a small middleware
+(`instrument()` in each service's `metrics.go`) that records
+
+- `http_requests_total{method, route, status}` — a counter
+- `http_request_duration_seconds{method, route}` — a histogram
+
+The label is the **registered route pattern** (e.g. `/transactions/{id}`),
+never the raw request path — using the raw path would make every distinct
+transaction ID its own Prometheus label value, and metric cardinality would
+grow without bound as the household adds more transactions. This is the
+standard pitfall with naive HTTP instrumentation, so it's called out here
+deliberately rather than left implicit.
+
+**Why this is useful for this project specifically:** the ledger
+authorization rules (personal vs. shared visibility, who can mutate what)
+live entirely in application code, not in the database — a bug there fails
+silently as a `404` or `403`, not a crash. `http_requests_total` sliced by
+`status` surfaces that kind of problem directly (e.g. an unexpected spike in
+`403`s on `/transactions/{id}` would suggest the mutation-rights check is
+misfiring) without needing to add ad-hoc logging. The latency histogram
+gives an early signal if, say, listing shared transactions gets slower as a
+household's history grows — something to watch given `GET /transactions`
+performs no pagination yet.
+
+**Kept deliberately minimal, consistent with the rest of this project's
+scope:**
+- Static scrape targets (`auth:80`, `budget:80` via Kubernetes Service DNS)
+  instead of `kubernetes_sd_configs` — with exactly two known services,
+  Kubernetes service-discovery and the RBAC it requires (a ClusterRole to
+  list pods/services) would be pure overhead.
+- No persistent volume for Prometheus — metrics history is lost on pod
+  restart, which is fine for a course demo and avoids another PVC to manage.
+- No Grafana or alerting rules — deferred; Prometheus's own expression
+  browser (`kubectl -n budget-app port-forward svc/prometheus 9090:9090`,
+  then `localhost:9090`) is enough to demonstrate that scraping and querying
+  work end to end.

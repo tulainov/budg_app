@@ -9,6 +9,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func getenv(key, fallback string) string {
@@ -51,8 +53,9 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("POST /signup", s.handleSignup)
-	mux.HandleFunc("POST /login", s.handleLogin)
+	mux.HandleFunc("POST /signup", instrument("/signup", s.handleSignup))
+	mux.HandleFunc("POST /login", instrument("/login", s.handleLogin))
+	mux.Handle("GET /metrics", promhttp.Handler())
 
 	httpServer := &http.Server{Addr: ":" + port, Handler: mux}
 

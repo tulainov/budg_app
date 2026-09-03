@@ -1,23 +1,23 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: auth
+  name: budget
   namespace: budget-app
   labels:
-    app: auth
+    app: budget
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: auth
+      app: budget
   template:
     metadata:
       labels:
-        app: auth
+        app: budget
     spec:
       containers:
-        - name: auth
-          image: budget-app/auth:dev
+        - name: budget
+          image: budget-app/budget:dev
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
@@ -29,8 +29,8 @@ spec:
                 secretKeyRef:
                   name: postgres-credentials
                   key: database-url
-            - name: JWT_PRIVATE_KEY_PATH
-              value: /etc/jwt/private.pem
+            - name: JWT_PUBLIC_KEY_PATH
+              value: /etc/jwt/public.pem
           volumeMounts:
             - name: jwt-keys
               mountPath: /etc/jwt
@@ -52,6 +52,6 @@ spec:
           secret:
             secretName: jwt-keys
             items:
-              - key: private.pem
-                path: private.pem
+              - key: public.pem
+                path: public.pem
                 mode: 0444
