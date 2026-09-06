@@ -335,3 +335,38 @@ scope:**
   browser (`kubectl -n budget-app port-forward svc/prometheus 9090:9090`,
   then `localhost:9090`) is enough to demonstrate that scraping and querying
   work end to end.
+
+## Mobile app
+
+`mobile/` is a minimal Expo (React Native + TypeScript) client: an auth
+screen (login, plus sign-up with a toggle between creating a new household
+and joining an existing one by ID), a transaction list (personal + shared,
+pull-to-refresh), and an add-transaction form (expense/income, personal vs.
+shared, optional category with inline category creation). It talks to the
+same `auth`/`budget` HTTP APIs used throughout this README — no separate
+mobile-specific backend or endpoints.
+
+Deliberately left out of scope, per this project's priorities: navigation
+library (three screens are swapped via plain local state in `App.tsx`
+instead), offline support, transaction editing/deletion from the UI (the API
+supports it; the UI doesn't expose it yet), and any visual polish.
+
+**Running it:**
+
+```bash
+cd mobile
+npm install   # already done if you're continuing this session
+npx expo start
+```
+
+Then press `w` for web, or scan the QR code with Expo Go on a phone. Before
+that works, point `mobile/src/config.ts` at wherever `auth`/`budget` are
+actually reachable — the file has the three cases spelled out (same machine,
+Android emulator, physical phone over LAN), since "`localhost`" means a
+different thing depending on where the app is actually running relative to
+the `kubectl port-forward` process.
+
+The JWT is stored via `expo-secure-store` (not `AsyncStorage`) so a restart
+doesn't force a re-login; a `401` from either service (e.g. an expired
+token) clears the stored session and drops the user back to the auth screen
+automatically, rather than showing a confusing error on every request.
