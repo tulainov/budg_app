@@ -8,6 +8,11 @@ feature completeness.
 ## Architecture
 
 ```
+                  ┌──────────────┐
+                  │  Mobile app   │  Expo / React Native
+                  └──────┬───────┘
+                         │  HTTP, JWT bearer token
+                         ▼
 ┌─────────────┐        JWT (RS256)        ┌───────────────┐
 │ auth service │──────────verified by────▶│ budget service │
 │    (Go)      │        public key         │      (Go)      │
@@ -19,6 +24,10 @@ feature completeness.
                   ┌─────────────┐
                   │  PostgreSQL  │
                   └─────────────┘
+
+┌────────────┐   scrapes GET /metrics
+│ Prometheus │ ──────────────────────▶  auth, budget
+└────────────┘
 ```
 
 - **auth service** — signup, login, issues JWTs. Owns `auth.households` and
@@ -30,6 +39,10 @@ feature completeness.
   single instance instead of two databases/containers to stay within the
   course's time budget; the schema split still keeps each service's tables
   isolated.
+- **Mobile app** — the only client in this project; see
+  [Mobile app](#mobile-app) below.
+- **Prometheus** — the CNCF component; see
+  [CNCF Landscape technology](#cncf-landscape-technology-prometheus) below.
 
 Both services are separate Go modules under `services/auth` and
 `services/budget`, each with its own `Dockerfile`, `go.mod`, and embedded
@@ -86,25 +99,28 @@ invite flow.
 
 ## 12-Factor App
 
-Documenting only the factors actually applied so far (steps 1–2); this section
-grows as later steps add Kubernetes, config-as-env-in-manifests, and metrics.
+Documenting only the factors actually applied — not all twelve are relevant
+at this project's scope, and the table below says which and why.
 
 | Factor | How it's applied |
 |---|---|
-| **III. Config** | Both services read all configuration — `PORT`, `DATABASE_URL`, `JWT_PRIVATE_KEY_PATH` / `JWT_PUBLIC_KEY_PATH` — from environment variables. Nothing is hardcoded; the same binary/image runs against local Postgres or a clustered one purely by changing env vars. |
-| **IV. Backing services** | Postgres is treated as an attached resource, addressed only via the `DATABASE_URL` env var. Swapping the local Postgres container for a different instance (different host, credentials, or even a managed Postgres later) requires no code change. |
+| **III. Config** | Both services read all configuration — `PORT`, `DATABASE_URL`, `JWT_PRIVATE_KEY_PATH` / `JWT_PUBLIC_KEY_PATH` — from environment variables. Nothing is hardcoded; the same binary/image runs against local Postgres or a clustered one purely by changing env vars. In Kubernetes, those same env vars are populated from Secrets (`k8s/*-deployment.yaml`) instead of a shell export — the mechanism the code relies on doesn't change between local dev and the cluster, only where the values come from. |
+| **IV. Backing services** | Postgres is treated as an attached resource, addressed only via the `DATABASE_URL` env var. Locally that URL points at `localhost:5432`; in Kubernetes it points at the `postgres` Service's DNS name instead — swapping the backing instance requires zero code changes, only a different Secret value. |
 | **V. Build, release, run** | Each service has a multi-stage `Dockerfile`: a `build` stage compiles the static Go binary, and a separate `distroless` runtime stage contains only the compiled binary — no Go toolchain, shell, or package manager in the image that runs. Configuration (env vars) is injected at run time, never baked into the image. |
 | **VI. Processes** | Both services are stateless — no in-memory session or request state. All persistent state lives in Postgres, so any instance can handle any request and the process can be killed/restarted freely. |
 | **VII. Port binding** | Each service is self-contained and binds its own port via `net/http`, configurable through `PORT`. No app server is injected by the runtime environment. |
 | **IX. Disposability** | Fast startup (single static Go binary, no runtime dependency resolution) and graceful shutdown: both services listen for `SIGTERM`/`SIGINT` and call `http.Server.Shutdown` with a 10s grace period before exiting, so in-flight requests aren't dropped mid-response when Kubernetes terminates a pod. |
-| **X. Dev/prod parity** | The same Docker image built and tested locally (`docker run`) is the one that will be loaded into the kind cluster — no separate "dev build" vs "prod build" of the application code, only env var differences. |
+| **X. Dev/prod parity** | The same Docker image built and tested locally (`docker run`) is the one loaded into the kind cluster via `kind load docker-image` — no separate "dev build" vs "prod build" of the application code, only env var differences. |
 | **XI. Logs** | Both services log unbuffered to stderr via Go's standard `log` package (`log.Printf`/`log.Fatal`) rather than writing to log files — captured directly by `docker logs` / `kubectl logs`, with no in-app log routing or rotation logic. |
 
-Not yet applicable / deferred:
-- **VIII. Concurrency** — scaling via the process model (multiple replicas)
-  isn't exercised until the Kubernetes step.
-- **XII. Admin processes** — no one-off admin/management scripts exist yet;
-  schema setup currently happens automatically on service startup.
+Deliberately not exercised at this project's scope:
+- **VIII. Concurrency** — every Deployment runs `replicas: 1`; scaling via the
+  process model would apply cleanly (both services are stateless, per Factor
+  VI) but was never actually exercised, since a two-person household demo has
+  no load to justify it.
+- **XII. Admin processes** — no one-off admin/management scripts run in the
+  application's own environment; schema setup happens automatically on
+  service startup instead of via a separate migration command.
 
 ## Running locally (pre-Kubernetes)
 
@@ -341,7 +357,9 @@ scope:**
 `mobile/` is a minimal Expo (React Native + TypeScript) client: an auth
 screen (login, plus sign-up with a toggle between creating a new household
 and joining an existing one by ID), a transaction list (personal + shared,
-pull-to-refresh), and an add-transaction form (expense/income, personal vs.
+pull-to-refresh, with a running balance shown separately per ledger — mixing
+personal and shared totals into one number would defeat the point of keeping
+them separate), and an add-transaction form (expense/income, personal vs.
 shared, optional category with inline category creation). It talks to the
 same `auth`/`budget` HTTP APIs used throughout this README — no separate
 mobile-specific backend or endpoints.
@@ -350,6 +368,15 @@ Deliberately left out of scope, per this project's priorities: navigation
 library (three screens are swapped via plain local state in `App.tsx`
 instead), offline support, transaction editing/deletion from the UI (the API
 supports it; the UI doesn't expose it yet), and any visual polish.
+
+**Android gotcha already fixed:** by default, Android floats the on-screen
+keyboard on top of the UI instead of resizing it, so a focused input near the
+bottom of a form (e.g. the inline "new category" field) ends up hidden behind
+the keyboard with no way to see what's being typed. Fixed with
+`"softwareKeyboardLayoutMode": "resize"` in `app.json` plus wrapping both
+form screens (`AuthScreen`, `AddTransactionScreen`) in `KeyboardAvoidingView`
++ a scrollable container. This is a config change, not a JS change — it
+needs a full restart of `expo start`, not just a reload, to take effect.
 
 **Running it:**
 
@@ -365,6 +392,55 @@ actually reachable — the file has the three cases spelled out (same machine,
 Android emulator, physical phone over LAN), since "`localhost`" means a
 different thing depending on where the app is actually running relative to
 the `kubectl port-forward` process.
+
+**Testing on a real phone (iPhone or Android), from a Windows/WSL2 dev
+machine:** this needs more than pointing `config.ts` at a LAN IP, because of
+how WSL2's networking actually works — worth documenting since it wasn't
+obvious and cost real debugging time to work out.
+
+1. Install **Expo Go** on the phone (App Store / Play Store) and put it on
+   the same Wi-Fi network as the PC.
+2. Find the PC's LAN IP: `ipconfig` in PowerShell, the IPv4 address under the
+   Wi-Fi adapter (e.g. `192.168.0.154`).
+3. Port-forward with `--address 0.0.0.0`, on ports other than `8081`/`8082` —
+   Expo's own dev server defaults to `8081`, which would otherwise collide:
+   ```bash
+   kubectl -n budget-app port-forward --address 0.0.0.0 svc/auth 18081:80
+   kubectl -n budget-app port-forward --address 0.0.0.0 svc/budget 18082:80
+   ```
+4. **This is the part that actually needs extra work on Windows.** `--address
+   0.0.0.0` makes the port-forward listen on all of the *WSL2 VM's* network
+   interfaces — it does not, on its own, expose the port on the Windows
+   host's real LAN-facing adapter. WSL2's automatic `localhost` forwarding
+   only bridges `localhost` on Windows into WSL2; it doesn't bridge the LAN
+   IP. Without the next step, the phone will get a hung connection (not even
+   a fast "connection refused") when it tries to reach the PC's LAN IP.
+   In an **Administrator** PowerShell:
+   ```powershell
+   wsl hostname -I   # WSL2's internal IP — changes across reboots, re-check if this stops working
+   netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=18081 connectaddress=<wsl-ip> connectport=18081
+   netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=18082 connectaddress=<wsl-ip> connectport=18082
+   New-NetFirewallRule -DisplayName "Budget App Auth" -Direction Inbound -LocalPort 18081 -Protocol TCP -Action Allow
+   New-NetFirewallRule -DisplayName "Budget App Budget" -Direction Inbound -LocalPort 18082 -Protocol TCP -Action Allow
+   ```
+   Verify with `curl http://<LAN-IP>:18081/healthz` from PowerShell itself
+   before trying the phone — isolates a network problem from an app problem.
+   To remove later or after the WSL2 IP changes: `netsh interface portproxy
+   delete v4tov4 listenaddress=0.0.0.0 listenport=18081` (repeat per port),
+   then re-add with the current IP.
+5. Update `mobile/src/config.ts` with that LAN IP and the `18081`/`18082`
+   ports.
+6. `cd mobile && npx expo start --tunnel` — `--tunnel` specifically, not the
+   default: WSL2 sometimes reports its own internal IP rather than the real
+   Wi-Fi IP when Metro builds the QR code, and `--tunnel` (via ngrok) routes
+   around that IP-detection problem entirely. This only affects how the phone
+   loads the JS bundle — it's unrelated to step 4, which is about the app's
+   own network calls once it's running.
+7. Scan the QR code (iPhone: Camera app; Android: Expo Go's own scanner).
+
+If login/signup fails with a network error but the app itself loaded, the
+network path from step 4 is the first thing to re-check — that error means
+the request never left the phone, not that the server rejected it.
 
 The JWT is stored via `expo-secure-store` (not `AsyncStorage`) so a restart
 doesn't force a re-login; a `401` from either service (e.g. an expired
