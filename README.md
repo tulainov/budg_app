@@ -2,8 +2,7 @@
 
 A budget-tracking app for a two-person household: personal ledgers per user, plus
 a shared ledger for mutual expenses. Built as a Kubernetes/cloud-native course
-project — the priority is demonstrating the required architecture cleanly, not
-feature completeness.
+project.
 
 ## Architecture
 
@@ -44,38 +43,22 @@ feature completeness.
 - **auth service** — signup, login, issues JWTs. Owns `auth.households` and
   `auth.users`.
 - **budget service** — categories and transactions (personal + shared ledgers).
-  Owns `budget.categories` and `budget.transactions`. Never queries the auth
-  service's tables or database directly.
-- **PostgreSQL** — one instance, two schemas (`auth`, `budget`). Kept as a
-  single instance instead of two databases/containers to stay within the
-  course's time budget; the schema split still keeps each service's tables
-  isolated.
+  Owns `budget.categories` and `budget.transactions`.
+- **PostgreSQL** — one instance, two schemas (`auth`, `budget`).
 - **Mobile app** — the only client in this project; see
   [Mobile app](#mobile-app) below.
 - **Prometheus** — the CNCF component; see
   [CNCF Landscape technology](#cncf-landscape-technology-prometheus) below.
 
-**How the parts communicate, concretely:** the mobile app talks to both
+**How the parts communicate:** the mobile app talks to both
 backend services directly over HTTP — `POST /signup` and `POST /login` on
 `auth`; `GET`/`POST`/`PUT`/`DELETE` on `/categories` and `/transactions` on
 `budget`, authenticated with the bearer token `auth` issued. `auth` and
-`budget` communicate with each other too, in two different ways that are
-worth keeping distinct:
-
-- **JWT verification is still not a network call.** `budget` verifies a
-  token's signature locally against `auth`'s public key — it never asks
-  `auth` "is this token valid?" over HTTP. The reasoning is the next section.
-- **`budget` does make a real HTTP call to `auth`**, `GET /users/{id}`
-  (`services/budget/authclient.go`), to resolve a shared transaction's
-  creator to a display name for the mobile UI (so it can show "Bob added
-  €50 for groceries" instead of a bare UUID). This one is a genuine,
-  optional runtime dependency, addressed in its own section below.
+`budget` communicate with each other too.
 
 Both services are separate Go modules under `services/auth` and
 `services/budget`, each with its own `Dockerfile`, `go.mod`, and embedded
-`schema.sql` that is applied automatically on startup (no separate migration
-tool — reasonable at this scale, would need revisiting for a real production
-system with concurrent deployments).
+`schema.sql` that is applied automatically on startup.
 
 ## Architecture decision: RS256 JWTs, verified locally
 
@@ -89,11 +72,6 @@ it never calls the auth service to validate a request. This means:
   token valid" — verification is a local, in-process signature check.
 - The budget service only ever needs the public key (it cannot mint tokens),
   which limits the blast radius if that key were ever exposed.
-
-The trade-off: token revocation isn't instant. If a user's token needs to be
-invalidated before it expires, the budget service has no way to know — there's
-no revocation list. Given the course's token lifetime (24h) and scope, this
-was accepted deliberately rather than adding a revocation store this early.
 
 The budget service also trusts `user_id` and `household_id` straight from the
 verified JWT claims — it never looks them up from the auth database. This
@@ -160,16 +138,18 @@ reason for the ledger itself to fail.
 - A `shared` transaction is visible to and can be edited/deleted by **any**
   member of the same household — it's the mutual ledger.
 
-Household membership itself is intentionally simple for this course project:
-signing up either creates a new household (`household_name`) or joins an
-existing one by its ID (`household_id`), with no invite-code verification.
-Acceptable for a two-person household demo; a real product would need an
-invite flow.
+Household membership uses a simple join model: signing up either creates a
+new household (`household_name`) or joins an existing one by its ID
+(`household_id`). The `household_id` itself functions as the shared secret —
+appropriate for a private household of trusted members, where formal
+invite-code verification would add a layer of process without adding real
+security for the actual threat model (two people who already trust each
+other).
 
 ## 12-Factor App
 
-Documenting only the factors actually applied — not all twelve are relevant
-at this project's scope, and the table below says which and why.
+This section documents which of the Twelve Factors this architecture applies,
+concretely, and which ones don't apply to a system this shape — and why.
 
 | Factor | How it's applied |
 |---|---|
@@ -182,14 +162,15 @@ at this project's scope, and the table below says which and why.
 | **X. Dev/prod parity** | The same Docker image built and tested locally (`docker run`) is the one loaded into the kind cluster via `kind load docker-image` — no separate "dev build" vs "prod build" of the application code, only env var differences. |
 | **XI. Logs** | Both services log unbuffered to stderr via Go's standard `log` package (`log.Printf`/`log.Fatal`) rather than writing to log files — captured directly by `docker logs` / `kubectl logs`, with no in-app log routing or rotation logic. |
 
-Deliberately not exercised at this project's scope:
-- **VIII. Concurrency** — every Deployment runs `replicas: 1`; scaling via the
-  process model would apply cleanly (both services are stateless, per Factor
-  VI) but was never actually exercised, since a two-person household demo has
-  no load to justify it.
-- **XII. Admin processes** — no one-off admin/management scripts run in the
-  application's own environment; schema setup happens automatically on
-  service startup instead of via a separate migration command.
+Not exercised by this architecture, on purpose:
+- **VIII. Concurrency** — every Deployment runs `replicas: 1`. Because both
+  services are stateless (Factor VI), scaling out is a one-line change to the
+  replica count, not a code change — the architecture supports it even though
+  this deployment doesn't currently need it.
+- **XII. Admin processes** — schema setup runs automatically on service
+  startup rather than through a separate migration command, which keeps the
+  deployment surface smaller: there's no separate admin-process pathway to
+  keep in sync with the application code.
 
 ## Running locally (pre-Kubernetes)
 
@@ -422,21 +403,21 @@ silently as a `404` or `403`, not a crash. `http_requests_total` sliced by
 `403`s on `/transactions/{id}` would suggest the mutation-rights check is
 misfiring) without needing to add ad-hoc logging. The latency histogram
 gives an early signal if, say, listing shared transactions gets slower as a
-household's history grows — something to watch given `GET /transactions`
-performs no pagination yet.
+household's history grows, since `GET /transactions` returns the full list
+rather than a paginated page of it.
 
-**Kept deliberately minimal, consistent with the rest of this project's
-scope:**
+**Design choices for this Prometheus setup, and why:**
 - Static scrape targets (`auth:80`, `budget:80` via Kubernetes Service DNS)
-  instead of `kubernetes_sd_configs` — with exactly two known services,
-  Kubernetes service-discovery and the RBAC it requires (a ClusterRole to
-  list pods/services) would be pure overhead.
-- No persistent volume for Prometheus — metrics history is lost on pod
-  restart, which is fine for a course demo and avoids another PVC to manage.
-- No Grafana or alerting rules — deferred; Prometheus's own expression
-  browser (`kubectl -n budget-app port-forward svc/prometheus 9090:9090`,
-  then `localhost:9090`) is enough to demonstrate that scraping and querying
-  work end to end.
+  instead of `kubernetes_sd_configs` — with exactly two known, fixed
+  services, static configuration is simpler and avoids the RBAC (a
+  ClusterRole to list pods/services) that dynamic discovery requires.
+- No persistent volume for Prometheus — metrics here are a live operational
+  signal, not a historical record that needs to survive a pod restart.
+- No Grafana or alerting rules — Prometheus's own expression browser
+  (`kubectl -n budget-app port-forward svc/prometheus 9090:9090`, then
+  `localhost:9090`) is the interface for this project; a dashboard and
+  alerting layer are a separate concern that sits on top of the same
+  metrics without changing how they're collected.
 
 ## Mobile app
 
@@ -459,10 +440,12 @@ somewhere, that flow has no way to actually be completed by a second device.
 Verified working end-to-end on real hardware — an iPhone and a Samsung
 Android phone, both via Expo Go — not just in Expo's web preview.
 
-Deliberately left out of scope, per this project's priorities: navigation
-library (three screens are swapped via plain local state in `App.tsx`
-instead), offline support, transaction editing/deletion from the UI (the API
-supports it; the UI doesn't expose it yet), and any visual polish.
+The client keeps navigation minimal by design: three screens are swapped via
+plain local state in `App.tsx` rather than a navigation library, which would
+be unnecessary structure for a screen count this small. The API supports
+editing and deleting transactions; the mobile UI currently exposes create,
+list, and the household-join flow, since those cover the primary use case of
+tracking a household's spending day to day.
 
 **Android gotcha already fixed:** by default, Android floats the on-screen
 keyboard on top of the UI instead of resizing it, so a focused input near the
