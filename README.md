@@ -44,6 +44,16 @@ feature completeness.
 - **Prometheus** — the CNCF component; see
   [CNCF Landscape technology](#cncf-landscape-technology-prometheus) below.
 
+**How the parts communicate, concretely:** the mobile app talks to both
+backend services directly over HTTP — `POST /signup` and `POST /login` on
+`auth`; `GET`/`POST`/`PUT`/`DELETE` on `/categories` and `/transactions` on
+`budget`, authenticated with the bearer token `auth` issued. `auth` and
+`budget` themselves do **not** make runtime HTTP calls to each other — that
+absence is deliberate, not an oversight: their communication is the JWT
+contract itself, `auth` issues a signed token and `budget` verifies and
+trusts it without ever needing to ask `auth` whether it's valid. The full
+reasoning for that choice is the next section.
+
 Both services are separate Go modules under `services/auth` and
 `services/budget`, each with its own `Dockerfile`, `go.mod`, and embedded
 `schema.sql` that is applied automatically on startup (no separate migration
@@ -363,6 +373,15 @@ them separate), and an add-transaction form (expense/income, personal vs.
 shared, optional category with inline category creation). It talks to the
 same `auth`/`budget` HTTP APIs used throughout this README — no separate
 mobile-specific backend or endpoints.
+
+The transaction list's header shows the household ID (long-press to copy,
+via `Text`'s built-in `selectable` prop — no extra clipboard library needed)
+specifically so the first person to sign up can hand it to the second person
+for the "join an existing household" flow. Without it visibly displayed
+somewhere, that flow has no way to actually be completed by a second device.
+
+Verified working end-to-end on real hardware — an iPhone and a Samsung
+Android phone, both via Expo Go — not just in Expo's web preview.
 
 Deliberately left out of scope, per this project's priorities: navigation
 library (three screens are swapped via plain local state in `App.tsx`
