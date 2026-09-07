@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -11,7 +12,29 @@ import (
 )
 
 type transactionHandler struct {
-	db *pgxpool.Pool
+	db   *pgxpool.Pool
+	auth *authClient
+}
+
+func bearerToken(r *http.Request) string {
+	token, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return token
+}
+
+// resolveCreatedBy attributes a transaction to a display name. The common
+// case (viewing your own transaction) needs no network call at all — your
+// own display name is already in your JWT claims. Only resolving someone
+// else's transaction (e.g. a shared one your partner created) calls out to
+// auth, and even that's best-effort: see authclient.go.
+func (h *transactionHandler) resolveCreatedBy(r *http.Request, claims authClaims, userID string) string {
+	if userID == claims.UserID {
+		return claims.DisplayName
+	}
+	name, ok := h.auth.lookupDisplayName(r.Context(), bearerToken(r), userID)
+	if !ok {
+		return ""
+	}
+	return name
 }
 
 func validateTransactionRequest(req TransactionRequest) error {
@@ -112,6 +135,7 @@ func (h *transactionHandler) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "create transaction failed")
 		return
 	}
+	t.CreatedBy = claims.DisplayName
 
 	writeJSON(w, http.StatusCreated, t)
 }
@@ -173,6 +197,24 @@ func (h *transactionHandler) list(w http.ResponseWriter, r *http.Request) {
 		transactions = append(transactions, t)
 	}
 
+	// Dedup by user_id so a long list only ever costs at most one auth
+	// lookup per distinct other household member, not one per transaction.
+	resolved := map[string]string{}
+	for i := range transactions {
+		uid := transactions[i].UserID
+		if uid == claims.UserID {
+			transactions[i].CreatedBy = claims.DisplayName
+			continue
+		}
+		if name, ok := resolved[uid]; ok {
+			transactions[i].CreatedBy = name
+			continue
+		}
+		name := h.resolveCreatedBy(r, claims, uid)
+		resolved[uid] = name
+		transactions[i].CreatedBy = name
+	}
+
 	writeJSON(w, http.StatusOK, transactions)
 }
 
@@ -202,6 +244,7 @@ func (h *transactionHandler) get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "get transaction failed")
 		return
 	}
+	t.CreatedBy = h.resolveCreatedBy(r, claimsFromContext(r.Context()), t.UserID)
 	writeJSON(w, http.StatusOK, t)
 }
 
@@ -262,6 +305,7 @@ func (h *transactionHandler) update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "update transaction failed")
 		return
 	}
+	t.CreatedBy = h.resolveCreatedBy(r, claims, t.UserID)
 
 	writeJSON(w, http.StatusOK, t)
 }

@@ -19,6 +19,7 @@ type Transaction struct {
 	ID          string    `json:"id"`
 	HouseholdID string    `json:"household_id"`
 	UserID      string    `json:"user_id"`
+	CreatedBy   string    `json:"created_by,omitempty"` // resolved via auth's /users/{id}; omitted if that lookup failed or was skipped
 	CategoryID  *string   `json:"category_id,omitempty"`
 	Scope       string    `json:"scope"`
 	AmountCents int64     `json:"amount_cents"`

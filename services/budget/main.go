@@ -32,6 +32,7 @@ func main() {
 	port := getenv("PORT", "8080")
 	databaseURL := mustGetenv("DATABASE_URL")
 	publicKeyPath := mustGetenv("JWT_PUBLIC_KEY_PATH")
+	authBaseURL := mustGetenv("AUTH_BASE_URL")
 
 	ctx := context.Background()
 
@@ -47,7 +48,7 @@ func main() {
 	}
 
 	categories := &categoryHandler{db: db}
-	transactions := &transactionHandler{db: db}
+	transactions := &transactionHandler{db: db, auth: newAuthClient(authBaseURL)}
 
 	auth := func(h http.HandlerFunc) http.HandlerFunc { return requireAuth(publicKey, h) }
 

@@ -55,6 +55,7 @@ func main() {
 	})
 	mux.HandleFunc("POST /signup", instrument("/signup", s.handleSignup))
 	mux.HandleFunc("POST /login", instrument("/login", s.handleLogin))
+	mux.HandleFunc("GET /users/{id}", instrument("/users/{id}", requireAuth(privateKey, s.handleGetUser)))
 	mux.Handle("GET /metrics", promhttp.Handler())
 
 	httpServer := &http.Server{Addr: ":" + port, Handler: mux}

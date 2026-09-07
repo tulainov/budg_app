@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
+  Platform,
   Pressable,
   RefreshControl,
   StyleSheet,
@@ -63,9 +64,13 @@ export default function TransactionsScreen({ onAddPress }: { onAddPress: () => v
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <View>
+        <View style={styles.headerLeft}>
           <Text style={styles.householdName}>{session?.household.name}</Text>
           <Text style={styles.subtitle}>{session?.user.display_name}</Text>
+          <Text style={styles.householdId} selectable>
+            ID: {session?.household.id}
+          </Text>
+          <Text style={styles.householdIdHint}>Hold to copy — share this so your partner can join</Text>
         </View>
         <Pressable onPress={logout}>
           <Text style={styles.logout}>Log out</Text>
@@ -131,12 +136,16 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     paddingHorizontal: 20,
     paddingTop: 56,
     paddingBottom: 16,
     borderBottomWidth: 1,
     borderBottomColor: '#eee',
+  },
+  headerLeft: {
+    flex: 1,
+    marginRight: 12,
   },
   householdName: {
     fontSize: 20,
@@ -144,6 +153,17 @@ const styles = StyleSheet.create({
   },
   subtitle: {
     color: '#666',
+    marginTop: 2,
+  },
+  householdId: {
+    color: '#888',
+    fontSize: 12,
+    marginTop: 8,
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
+  },
+  householdIdHint: {
+    color: '#aaa',
+    fontSize: 11,
     marginTop: 2,
   },
   logout: {

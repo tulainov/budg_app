@@ -9,20 +9,31 @@ feature completeness.
 
 ```
                   ┌──────────────┐
-                  │  Mobile app   │  Expo / React Native
+                  │  Mobile app  │  Expo / React Native
                   └──────┬───────┘
                          │  HTTP, JWT bearer token
                          ▼
-┌─────────────┐        JWT (RS256)        ┌───────────────┐
-│ auth service │──────────verified by────▶│ budget service │
-│    (Go)      │        public key         │      (Go)      │
-└──────┬───────┘        (no network call)   └───────┬────────┘
-       │                                            │
-       │           schema: auth.*                  │  schema: budget.*
-       └────────────────┬───────────────────────────┘
+                ┌────────────────┐
+                │  auth service  │
+                │      (Go)      │
+                └───┬────────▲───┘
+                    │        │
+      issues JWT,   │        │  GET /users/{id}
+      verified by   │        │  real HTTP call,
+      budget via    │        │  best-effort name
+      public key,   │        │  lookup only — the
+      no network    │        │  ledger itself never
+      call for this │        │  depends on this
+                    ▼        │
+                ┌─────────────────┐
+                │ budget service  │
+                │      (Go)       │
+                └────────┬────────┘
+                         │
+       auth: schema auth.*   budget: schema budget.*
                          ▼
                   ┌─────────────┐
-                  │  PostgreSQL  │
+                  │  PostgreSQL │
                   └─────────────┘
 
 ┌────────────┐   scrapes GET /metrics
@@ -48,11 +59,17 @@ feature completeness.
 backend services directly over HTTP — `POST /signup` and `POST /login` on
 `auth`; `GET`/`POST`/`PUT`/`DELETE` on `/categories` and `/transactions` on
 `budget`, authenticated with the bearer token `auth` issued. `auth` and
-`budget` themselves do **not** make runtime HTTP calls to each other — that
-absence is deliberate, not an oversight: their communication is the JWT
-contract itself, `auth` issues a signed token and `budget` verifies and
-trusts it without ever needing to ask `auth` whether it's valid. The full
-reasoning for that choice is the next section.
+`budget` communicate with each other too, in two different ways that are
+worth keeping distinct:
+
+- **JWT verification is still not a network call.** `budget` verifies a
+  token's signature locally against `auth`'s public key — it never asks
+  `auth` "is this token valid?" over HTTP. The reasoning is the next section.
+- **`budget` does make a real HTTP call to `auth`**, `GET /users/{id}`
+  (`services/budget/authclient.go`), to resolve a shared transaction's
+  creator to a display name for the mobile UI (so it can show "Bob added
+  €50 for groceries" instead of a bare UUID). This one is a genuine,
+  optional runtime dependency, addressed in its own section below.
 
 Both services are separate Go modules under `services/auth` and
 `services/budget`, each with its own `Dockerfile`, `go.mod`, and embedded
@@ -82,7 +99,49 @@ The budget service also trusts `user_id` and `household_id` straight from the
 verified JWT claims — it never looks them up from the auth database. This
 keeps the two services' data fully decoupled: the budget service's schema
 only ever stores opaque IDs, never a foreign key into another service's
-tables.
+tables. That still holds after the next section's addition: the lookup
+described there is read-time display enrichment only, never a storage
+dependency or part of any authorization decision.
+
+## Real inter-service call: attributing shared transactions
+
+The one place `auth` and `budget` genuinely talk to each other over the
+network at request time: `GET /users/{id}` on `auth`
+(`services/auth/users.go`), called by `budget`
+(`services/budget/authclient.go`) to resolve a shared transaction's
+`user_id` into a display name — otherwise the mobile app has no way to show
+*who* on the household added a given shared expense, only an opaque UUID it
+can't do anything with.
+
+**On the `auth` side:** the endpoint requires a valid bearer token (a new
+`requireAuth` middleware, `services/auth/middleware.go`) and only returns a
+user if they're in the *caller's own* household — a lookup across
+households returns `404`, not the user's data, same "don't confirm existence
+you're not entitled to see" pattern the ledger rules already use. Verifying
+that token needs no new secret or mount: an `*rsa.PrivateKey` in Go already
+carries its public half in memory (`privateKey.PublicKey`), so `auth` can
+authenticate requests to its own endpoints using the exact same key it
+already loads to sign tokens.
+
+**On the `budget` side:** the request forwards the *caller's own* bearer
+token to `auth` — no separate service-to-service credential — and:
+- Skips the network call entirely when the transaction being viewed is the
+  caller's own: their own display name is already sitting in their JWT
+  claims, no request needed.
+- Dedupes by `user_id` when listing many transactions, so a long list costs
+  at most one lookup per distinct *other* household member, never one call
+  per transaction.
+- Times out after 3 seconds and treats every failure — timeout, `auth`
+  unreachable, unknown user — identically: the `created_by` field is simply
+  omitted from that transaction's JSON, and the request still returns
+  `200`. Verified directly: with `auth` stopped entirely, `GET /transactions`
+  through `budget` still returned in 16ms with full ledger data, just
+  without attribution.
+
+That fail-soft handling is the point. This lookup is a genuine, additional
+runtime dependency on `auth` being reachable — unlike JWT verification — and
+deliberately an *optional* one: a cosmetic detail in the response, never a
+reason for the ledger itself to fail.
 
 ## Data model
 
@@ -114,7 +173,7 @@ at this project's scope, and the table below says which and why.
 
 | Factor | How it's applied |
 |---|---|
-| **III. Config** | Both services read all configuration — `PORT`, `DATABASE_URL`, `JWT_PRIVATE_KEY_PATH` / `JWT_PUBLIC_KEY_PATH` — from environment variables. Nothing is hardcoded; the same binary/image runs against local Postgres or a clustered one purely by changing env vars. In Kubernetes, those same env vars are populated from Secrets (`k8s/*-deployment.yaml`) instead of a shell export — the mechanism the code relies on doesn't change between local dev and the cluster, only where the values come from. |
+| **III. Config** | Both services read all configuration — `PORT`, `DATABASE_URL`, `JWT_PRIVATE_KEY_PATH` / `JWT_PUBLIC_KEY_PATH`, and `budget`'s `AUTH_BASE_URL` (where it sends its `GET /users/{id}` call) — from environment variables. Nothing is hardcoded; the same binary/image runs against local Postgres or a clustered one purely by changing env vars. In Kubernetes, those same env vars are populated from Secrets (`k8s/*-deployment.yaml`) instead of a shell export — the mechanism the code relies on doesn't change between local dev and the cluster, only where the values come from. |
 | **IV. Backing services** | Postgres is treated as an attached resource, addressed only via the `DATABASE_URL` env var. Locally that URL points at `localhost:5432`; in Kubernetes it points at the `postgres` Service's DNS name instead — swapping the backing instance requires zero code changes, only a different Secret value. |
 | **V. Build, release, run** | Each service has a multi-stage `Dockerfile`: a `build` stage compiles the static Go binary, and a separate `distroless` runtime stage contains only the compiled binary — no Go toolchain, shell, or package manager in the image that runs. Configuration (env vars) is injected at run time, never baked into the image. |
 | **VI. Processes** | Both services are stateless — no in-memory session or request state. All persistent state lives in Postgres, so any instance can handle any request and the process can be killed/restarted freely. |
@@ -155,8 +214,13 @@ Budget service (separate terminal):
 ```bash
 cd services/budget
 DATABASE_URL='postgres://budget:devpass@localhost:5432/budgetapp' \
-  JWT_PUBLIC_KEY_PATH=../auth/keys/public.pem PORT=8082 go run .
+  JWT_PUBLIC_KEY_PATH=../auth/keys/public.pem AUTH_BASE_URL=http://localhost:8081 \
+  PORT=8082 go run .
 ```
+
+`AUTH_BASE_URL` is where `budget` sends its real inter-service call, `GET
+/users/{id}` — see [Real inter-service
+call](#real-inter-service-call-attributing-shared-transactions) above.
 
 Generating a dev JWT keypair (only needed once, `services/auth/keys/` is
 gitignored):
@@ -204,9 +268,16 @@ docker run -d --name auth --network budget-net -p 18081:8080 \
 docker run -d --name budget --network budget-net -p 18082:8080 \
   -e DATABASE_URL=postgres://budget:devpass@budget-postgres:5432/budgetapp \
   -e JWT_PUBLIC_KEY_PATH=/keys/public.pem \
+  -e AUTH_BASE_URL=http://auth:8080 \
   -v "$(pwd)/services/auth/keys:/keys:ro" \
   budget-app/budget:dev
 ```
+
+`AUTH_BASE_URL` uses the container name `auth` as its hostname here — Docker's
+user-defined network gives containers DNS resolution by name, the same
+property Kubernetes Services provide, which is exactly why this setup was
+described earlier as "closer to how they'll talk to each other in
+Kubernetes."
 
 Note: the distroless runtime image runs as a non-root user, so the mounted
 `private.pem` needs to be readable by it (`chmod 644` is sufficient for local
@@ -222,9 +293,14 @@ StatefulSet — a single replica with `strategy: Recreate` is enough here),
 Postgres via the `postgres` ClusterIP Service's DNS name — the same
 `postgres:5432` hostname works whether a pod lands on any node in the
 cluster, no hardcoded IPs anywhere. `budget` reaches `auth`'s public key the
-same way conceptually, except it doesn't even need `auth` to be reachable at
-request time, per the RS256-local-verification decision above — the public
-key is just mounted from a Secret at startup.
+same way conceptually for JWT verification, except it doesn't even need
+`auth` to be reachable at request time for that, per the
+RS256-local-verification decision above — the public key is just mounted
+from a Secret at startup. It *does* need `auth` reachable for the separate
+`GET /users/{id}` attribution call, and reaches it the same way as
+Postgres: `budget-deployment.yaml` sets `AUTH_BASE_URL=http://auth`, the
+`auth` Service's DNS name — no hardcoded pod IP, and it survives `auth`
+being rescheduled to a different pod entirely.
 
 **Secrets**: `postgres-credentials` (DB user/password/db-name plus a
 ready-to-use `database-url`) and `jwt-keys` (the RSA keypair) are generated

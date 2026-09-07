@@ -31,6 +31,8 @@ spec:
                   key: database-url
             - name: JWT_PUBLIC_KEY_PATH
               value: /etc/jwt/public.pem
+            - name: AUTH_BASE_URL
+              value: http://auth
           volumeMounts:
             - name: jwt-keys
               mountPath: /etc/jwt
